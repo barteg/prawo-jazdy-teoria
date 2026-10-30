@@ -1,0 +1,20 @@
+{
+  "name": "prawo-jazdy-teoria",
+  "version": "1.0.0",
+  "description": "Oficjalna baza pytań na prawo jazdy, symulator egzaminu WORD oraz kompendium wiedzy.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "tunnel": "node server.js --tunnel",
+    "deploy": "node scripts/deploy.js"
+  },
+  "keywords": [
+    "prawo-jazdy",
+    "egzamin-word",
+    "pwa",
+    "ios"
+  ],
+  "author": "",
+  "license": "MIT"
+}

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="pl" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Prawo Jazdy — Teoria & Egzamin WORD</title>
+  
+  <!-- iOS Meta Tags for Home Screen Shortcut / Web App -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Prawo Jazdy">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="apple-touch-icon" href="src/icons/apple-touch-icon.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="src/icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="src/icons/favicon.png">
+
+  <!-- Manifest -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#2563eb">
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+
+  <!-- Loading indicator -->
+  <div id="app-loading" style="display: none; position: fixed; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #3b82f6, #60a5fa); z-index: 100;"></div>
+
+  <!-- Insecure Context Warning Banner (Safari requires HTTPS for offline PWA without computer) -->
+  <div id="insecure-context-banner" style="display: none; background: #b91c1c; color: #fff; padding: 10px 16px; font-size: 13px; line-height: 1.4; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer;">
+    <div>
+      <span>⚠️ <strong>Uwaga (iPhone):</strong> Otwarto przez lokalne HTTP. Aby aplikacja działała po wyłączeniu komputera, iOS wymaga adresu HTTPS (np. z darmowego GitHub Pages). <u>Dotknij, aby dowiedzieć się więcej</u></span>
+    </div>
+    <button id="btn-close-insecure-banner" style="background: none; border: none; color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; padding: 4px 8px;">✕</button>
+  </div>
+
+  <!-- App Header -->
+  <header class="app-header">
+    <div class="brand-wrapper">
+      <div class="brand-badge">L</div>
+      <div class="brand-title">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span>Prawo Jazdy</span>
+          <span id="offline-badge" style="display: none; font-size: 10px; padding: 2px 6px; background: rgba(234, 179, 8, 0.2); color: #eab308; border-radius: 999px; border: 1px solid rgba(234, 179, 8, 0.4); font-weight: 600;">✈️ Offline</span>
+        </div>
+        <span class="brand-subtitle">Egzamin WORD & Teoria</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <!-- Category selector -->
+      <select id="category-select" class="category-select" title="Wybierz kategorię prawa jazdy">
+        <option value="B" selected>Kategoria B</option>
+      </select>
+
+      <!-- iOS shortcut guide button -->
+      <button id="btn-ios-info" class="icon-btn" title="Dodaj do ekranu iPhone (iOS)">
+        📲
+      </button>
+
+      <!-- Theme toggle -->
+      <button id="btn-toggle-theme" class="icon-btn" title="Zmień motyw">
+        <span id="theme-icon">☀️</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Content Container -->
+  <main class="container">
+
+    <!-- TAB 1: EXAM (WORD Simulation) -->
+    <section id="view-exam" class="tab-view active">
+      <div id="exam-container">
+        <!-- Rendered by app.js -->
+      </div>
+    </section>
+
+    <!-- TAB 2: PRACTICE (Learning Mode) -->
+    <section id="view-practice" class="tab-view">
+      <div id="practice-container">
+        <!-- Rendered by app.js -->
+      </div>
+    </section>
+
+    <!-- TAB 3: MISTAKES (Wrong answers review) -->
+    <section id="view-mistakes" class="tab-view">
+      <div id="mistakes-container">
+        <!-- Rendered by app.js -->
+      </div>
+    </section>
+
+    <!-- TAB 4: COMPENDIUM (Theory Knowledge Base) -->
+    <section id="view-compendium" class="tab-view">
+      <div class="card mb-4">
+        <div class="card-title">
+          <span>📖</span> Kompendium Wiedzy Teoretycznej
+        </div>
+        <p class="card-subtitle">
+          Wszystkie najważniejsze zasady ruchu drogowego, limity, skrzyżowania i pierwsza pomoc w jednym miejscu.
+        </p>
+        <input type="text" id="compendium-search" class="search-input" placeholder="🔍 Szukaj w kompendium (np. prędkości, rondo, alkohol)..." />
+      </div>
+
+      <!-- Road signs gallery card -->
+      <div class="card mb-4">
+        <div class="card-title">
+          <span>🛑</span> Najważniejsze Znaki Drogowe
+        </div>
+        <p class="card-subtitle">Dotknij znaku, aby zobaczyć jego znaczenie i pułapki egzaminacyjne.</p>
+        <div id="road-signs-gallery" class="signs-grid">
+          <!-- Rendered by app.js -->
+        </div>
+      </div>
+
+      <!-- Chapters Accordion -->
+      <div id="compendium-list">
+        <!-- Rendered by app.js -->
+      </div>
+    </section>
+
+    <!-- TAB 5: STATS (User Statistics & History) -->
+    <section id="view-stats" class="tab-view">
+      <div class="card">
+        <div class="card-title">
+          <span>📊</span> Twoje Postępy i Statystyki
+        </div>
+        <p class="card-subtitle">Śledź swoje wyniki i gotowość do oficjalnego egzaminu państwowego.</p>
+
+        <div class="result-breakdown" style="margin-bottom: 20px;">
+          <div class="result-stat-box text-center">
+            <div id="stat-exams-total" style="font-size: 24px; font-weight: 800; color: var(--accent-blue);">0</div>
+            <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Egzaminy</div>
+          </div>
+          <div class="result-stat-box text-center">
+            <div id="stat-exams-passed" style="font-size: 24px; font-weight: 800; color: var(--accent-green);">0</div>
+            <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Zdane</div>
+          </div>
+          <div class="result-stat-box text-center">
+            <div id="stat-pass-rate" style="font-size: 24px; font-weight: 800; color: var(--accent-yellow);">0%</div>
+            <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Zdawalność</div>
+          </div>
+          <div class="result-stat-box text-center">
+            <div id="stat-question-accuracy" style="font-size: 24px; font-weight: 800; color: #a855f7;">0%</div>
+            <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Skuteczność</div>
+          </div>
+        </div>
+
+        <div class="flex-between mb-2">
+          <span style="font-size: 14px; font-weight: 600;">Rozwiązane pytania łącznie:</span>
+          <span id="stat-questions-answered" style="font-weight: 700;">0</span>
+        </div>
+
+        <hr style="border: none; border-top: 1px solid var(--border-color); margin: 20px 0;" />
+
+        <div class="flex-between mb-4">
+          <h4 style="font-size: 15px; font-weight: 700;">Historia egzaminów</h4>
+          <button id="btn-reset-stats" class="btn btn-secondary" style="width: auto; padding: 4px 10px; font-size: 11px;">
+            Wyczyść
+          </button>
+        </div>
+
+        <div id="stat-history-list">
+          <!-- Rendered by app.js -->
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Bottom Navigation Bar (iOS Tab Bar) -->
+  <nav class="bottom-nav">
+    <button class="nav-tab active" data-target="exam">
+      <span class="tab-icon">📝</span>
+      <span class="tab-label">Egzamin</span>
+    </button>
+    <button class="nav-tab" data-target="practice">
+      <span class="tab-icon">🧠</span>
+      <span class="tab-label">Nauka</span>
+    </button>
+    <button class="nav-tab" data-target="mistakes">
+      <span class="tab-icon">❌</span>
+      <span class="tab-label">Błędy <span id="nav-mistakes-count" class="badge badge-red" style="display:none; font-size:9px; padding:2px 5px; margin-left:2px;">0</span></span>
+    </button>
+    <button class="nav-tab" data-target="compendium">
+      <span class="tab-icon">📖</span>
+      <span class="tab-label">Kompendium</span>
+    </button>
+    <button class="nav-tab" data-target="stats">
+      <span class="tab-icon">📊</span>
+      <span class="tab-label">Statystyki</span>
+    </button>
+  </nav>
+
+  <!-- Modal: iOS Add to Home Screen Instructions -->
+  <div id="ios-install-modal" class="modal-overlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <div class="modal-title">📲 Jak dodać do ekranu telefonu (bez komputera)</div>
+        <button id="btn-close-ios-modal" class="icon-btn" style="width: 30px; height: 30px; font-size: 14px;">✕</button>
+      </div>
+      
+      <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 10px; padding: 12px; margin-bottom: 16px; font-size: 13px; line-height: 1.5;">
+        <strong>💡 Działanie bez komputera & offline:</strong><br>
+        System iOS (Safari) wymaga adresu <strong>HTTPS</strong>, aby na stałe zapisać całą aplikację i bazę pytań w pamięci telefonu. Po dodaniu z HTTPS komputer można całkowicie wyłączyć!
+      </div>
+
+      <div class="ios-step">
+        <div class="ios-step-num">1</div>
+        <div class="ios-step-text">
+          Otwórz aplikację przez adres <strong>HTTPS</strong> (np. darmowy hosting GitHub Pages lub tunel z terminala).
+        </div>
+      </div>
+
+      <div class="ios-step">
+        <div class="ios-step-num">2</div>
+        <div class="ios-step-text">
+          Dotknij przycisku <strong>Udostępnij</strong> na dolnym pasku Safari (kwadrat z wychodzącą w górę strzałką ⎋).
+        </div>
+      </div>
+
+      <div class="ios-step">
+        <div class="ios-step-num">3</div>
+        <div class="ios-step-text">
+          Przewiń listę w dół i wybierz <strong>„Do ekranu początkowego”</strong> (lub „Add to Home Screen”).
+        </div>
+      </div>
+
+      <div class="ios-step">
+        <div class="ios-step-num">4</div>
+        <div class="ios-step-text">
+          Dotknij <strong>„Dodaj”</strong> w prawym górnym rogu. Gotowe!
+        </div>
+      </div>
+
+      <div style="font-size: 12px; color: var(--text-secondary); margin-top: 10px; line-height: 1.4;">
+        ✅ Pytania, kompendium, znaki i testy działają teraz bezpośrednio z pamięci telefonu — bez połączenia z komputerem i w 100% offline.
+      </div>
+
+      <button onclick="document.getElementById('ios-install-modal').classList.remove('active')" class="btn btn-primary mt-4">
+        Rozumiem, super!
+      </button>
+    </div>
+  </div>
+
+  <!-- Modal: Sign Details -->
+  <div id="sign-detail-modal" class="modal-overlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <div class="modal-title">Szczegóły znaku</div>
+        <button id="btn-close-sign-modal" class="icon-btn" style="width: 30px; height: 30px; font-size: 14px;">✕</button>
+      </div>
+      <div id="sign-modal-content">
+        <!-- Rendered by app.js -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
