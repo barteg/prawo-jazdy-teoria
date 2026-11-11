@@ -7,6 +7,30 @@ import { ROAD_SIGNS } from './signs-data.js';
 const CDN_IMG_BASE = 'https://f003.backblazeb2.com/file/prawko/img/';
 const CDN_VID_BASE = 'https://f003.backblazeb2.com/file/prawko/vid/';
 
+// Build a media URL. Filenames often contain spaces and other characters that
+// must be percent-encoded, otherwise the browser fails to load the asset.
+function mediaUrl(media, mediaType) {
+  const base = mediaType === 'video' ? CDN_VID_BASE : CDN_IMG_BASE;
+  return base + encodeURIComponent(media);
+}
+
+// Nudge freshly-rendered videos to autoplay. The `autoplay` attribute is
+// unreliable for elements inserted via innerHTML (especially on iOS Safari), so
+// we also call play() explicitly. If the browser still blocks it, the native
+// `controls` let the user start the clip manually.
+function playActiveVideo(container) {
+  const video = (container || document).querySelector('video');
+  if (!video) return;
+  video.muted = true; // required for programmatic autoplay
+  const attempt = () => {
+    const p = video.play();
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  };
+  attempt();
+  // Retry once metadata is ready (covers slow first-frame decode).
+  video.addEventListener('loadeddata', attempt, { once: true });
+}
+
 // State
 const state = {
   activeTab: 'exam',
@@ -60,6 +84,14 @@ const state = {
     isAnswered: false
   },
 
+  // Mastery / Spaced-repetition progress
+  // A question answered correctly MASTERY_THRESHOLD times in a row (in Practice)
+  // is "mastered" and removed from the default practice pool.
+  progress: {
+    streaks: {},   // { 'B:99': 2 }  consecutive-correct counter per question
+    mastered: {}   // { 'B:99': true } mastered questions (removed from pool)
+  },
+
   // Compendium
   compendiumSearch: '',
 
@@ -78,8 +110,12 @@ const STORAGE_KEYS = {
   STATS: 'pj_user_stats',
   MISTAKES: 'pj_mistakes_ids',
   BOOKMARKS: 'pj_bookmarks_ids',
-  THEME: 'pj_theme_preference'
+  THEME: 'pj_theme_preference',
+  PROGRESS: 'pj_mastery_progress'
 };
+
+// Number of consecutive correct answers needed to "master" a question.
+const MASTERY_THRESHOLD = 3;
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -109,8 +145,86 @@ function loadSavedData() {
 
     const savedMistakes = localStorage.getItem(STORAGE_KEYS.MISTAKES);
     if (savedMistakes) state.mistakes.questionIds = JSON.parse(savedMistakes);
+
+    const savedProgress = localStorage.getItem(STORAGE_KEYS.PROGRESS);
+    if (savedProgress) {
+      const p = JSON.parse(savedProgress);
+      state.progress.streaks = p.streaks || {};
+      state.progress.mastered = p.mastered || {};
+    }
   } catch (e) {
     console.error('Failed to load local storage:', e);
+  }
+}
+
+function saveProgress() {
+  try {
+    localStorage.setItem(STORAGE_KEYS.PROGRESS, JSON.stringify(state.progress));
+  } catch (e) {
+    console.warn('Storage save error:', e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mastery Management (answer 3x correctly in a row -> removed from the pool)
+// ---------------------------------------------------------------------------
+// Questions ids repeat across categories, so key mastery by category + id.
+function qKey(q, cat = state.currentCategory) {
+  return `${cat}:${q.id}`;
+}
+
+function isMastered(q) {
+  return !!state.progress.mastered[qKey(q)];
+}
+
+function getStreak(q) {
+  return state.progress.streaks[qKey(q)] || 0;
+}
+
+// Record a practice answer and return whether this answer just mastered the question.
+function recordMasteryAnswer(q, isCorrect) {
+  const key = qKey(q);
+  let justMastered = false;
+
+  if (isCorrect) {
+    const next = (state.progress.streaks[key] || 0) + 1;
+    state.progress.streaks[key] = next;
+    if (next >= MASTERY_THRESHOLD && !state.progress.mastered[key]) {
+      state.progress.mastered[key] = true;
+      justMastered = true;
+    }
+  } else {
+    // A wrong answer resets the streak and, if it was mastered, brings it back.
+    state.progress.streaks[key] = 0;
+    delete state.progress.mastered[key];
+  }
+
+  saveProgress();
+  updateMasteredBadge();
+  return justMastered;
+}
+
+function unmasterQuestion(q) {
+  const key = qKey(q);
+  delete state.progress.mastered[key];
+  state.progress.streaks[key] = 0;
+  saveProgress();
+  updateMasteredBadge();
+}
+
+// Count mastered questions in the currently loaded category.
+function masteredCountForCategory() {
+  const catData = state.questionsCache[state.currentCategory];
+  if (!catData) return 0;
+  return catData.all.reduce((n, q) => n + (isMastered(q) ? 1 : 0), 0);
+}
+
+function updateMasteredBadge() {
+  const badge = document.getElementById('nav-mastered-count');
+  if (badge) {
+    const count = masteredCountForCategory();
+    badge.textContent = count > 0 ? count : '';
+    badge.style.display = count > 0 ? 'inline-flex' : 'none';
   }
 }
 
@@ -263,6 +377,38 @@ async function loadMetadata() {
   }
 }
 
+// Clean and bucket raw questions.
+// The source data mislabels some questions' `type`; the real answer format is
+// determined by `correct` (T/N = yes-no, A/B/C = multiple choice). We also drop
+// multiple-choice questions whose answer options were never captured, since they
+// are impossible to answer correctly.
+function normalizeQuestions(rawList) {
+  const all = [];
+  const basic = [];
+  const specialist = [];
+
+  (rawList || []).forEach(raw => {
+    const correct = String(raw.correct || '').trim().toUpperCase();
+    let type;
+    if (correct === 'T' || correct === 'N') {
+      type = 'basic';
+    } else if (correct === 'A' || correct === 'B' || correct === 'C') {
+      type = 'specialist';
+      // Multiple-choice questions must carry all three option texts.
+      const hasOptions = ['a', 'b', 'c'].every(k => raw[k] && String(raw[k]).trim());
+      if (!hasOptions) return; // incomplete data — skip
+    } else {
+      return; // unknown answer key — skip
+    }
+
+    const q = { ...raw, type, correct };
+    all.push(q);
+    (type === 'basic' ? basic : specialist).push(q);
+  });
+
+  return { all, basic, specialist };
+}
+
 async function switchCategory(cat) {
   state.currentCategory = cat;
   const loadingEl = document.getElementById('app-loading');
@@ -290,18 +436,7 @@ async function switchCategory(cat) {
         }
       }
       
-      const basic = [];
-      const specialist = [];
-      (data.questions || []).forEach(q => {
-        if (q.type === 'basic') basic.push(q);
-        else specialist.push(q);
-      });
-
-      state.questionsCache[cat] = {
-        all: data.questions || [],
-        basic,
-        specialist
-      };
+      state.questionsCache[cat] = normalizeQuestions(data.questions || []);
     }
 
     // Refresh views with new questions
@@ -317,6 +452,7 @@ async function switchCategory(cat) {
   } finally {
     if (loadingEl) loadingEl.style.display = 'none';
     updateMistakesBadge();
+    updateMasteredBadge();
   }
 }
 
@@ -506,17 +642,17 @@ function renderExamQuestion() {
   let mediaHtml = '';
   if (q.media) {
     if (q.mediaType === 'video') {
-      const vidUrl = `${CDN_VID_BASE}${q.media}`;
+      const vidUrl = mediaUrl(q.media, 'video');
       mediaHtml = `
         <div class="media-viewport">
-          <video id="exam-video" src="${vidUrl}" playsinline autoplay loop muted preload="auto">
+          <video id="exam-video" src="${vidUrl}" playsinline autoplay loop muted controls controlsList="nodownload noplaybackrate" disablepictureinpicture preload="auto">
             Twoja przeglądarka nie obsługuje wideo.
           </video>
           <button class="replay-btn" onclick="document.getElementById('exam-video').play()">🔁 Odtwórz</button>
         </div>
       `;
     } else {
-      const imgUrl = `${CDN_IMG_BASE}${q.media}`;
+      const imgUrl = mediaUrl(q.media, 'image');
       mediaHtml = `
         <div class="media-viewport">
           <img src="${imgUrl}" alt="Ilustracja do pytania" loading="eager" />
@@ -604,6 +740,7 @@ function renderExamQuestion() {
   `;
 
   updateExamHeaderTimers();
+  playActiveVideo(container);
 
   // Attach answer selection handlers
   container.querySelectorAll('.answer-option').forEach(btn => {
@@ -768,9 +905,17 @@ function filterPracticeQuestions() {
   const catData = state.questionsCache[state.currentCategory];
   if (!catData) return;
 
-  let pool = catData.all;
-  if (state.practice.currentFilter === 'basic') pool = catData.basic;
-  else if (state.practice.currentFilter === 'specialist') pool = catData.specialist;
+  let pool;
+  if (state.practice.currentFilter === 'mastered') {
+    // Review mode: show ONLY mastered questions.
+    pool = catData.all.filter(isMastered);
+  } else {
+    if (state.practice.currentFilter === 'basic') pool = catData.basic;
+    else if (state.practice.currentFilter === 'specialist') pool = catData.specialist;
+    else pool = catData.all;
+    // By default mastered questions are removed from the pool.
+    pool = pool.filter(item => !isMastered(item));
+  }
 
   if (state.practice.searchQuery.trim()) {
     const q = state.practice.searchQuery.toLowerCase();
@@ -787,12 +932,38 @@ function renderPracticeUI() {
   const qList = state.practice.filteredQuestions;
   const total = qList.length;
 
+  const catAll = state.questionsCache[state.currentCategory]?.all || [];
+  const masteredTotal = masteredCountForCategory();
+  const activePoolCount = catAll.length - masteredTotal;
+
   if (total === 0) {
+    const emptyMsg = state.practice.currentFilter === 'mastered'
+      ? 'Nie masz jeszcze opanowanych pytań. Pytanie trafia tutaj, gdy odpowiesz na nie poprawnie 3 razy z rzędu.'
+      : (masteredTotal > 0 && !state.practice.searchQuery.trim()
+          ? '🎉 Wszystkie pytania z tej puli zostały opanowane! Zajrzyj do zakładki „Opanowane”, aby je powtórzyć.'
+          : 'Brak pytań spełniających kryteria.');
     container.innerHTML = `
+      <!-- Filter tabs -->
+      <div style="display: flex; gap: 8px; margin-bottom: 12px; overflow-x: auto; padding-bottom: 4px;">
+        <button class="btn btn-secondary ${state.practice.currentFilter === 'all' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px; white-space: nowrap;" data-filter="all">Do nauki (${activePoolCount})</button>
+        <button class="btn btn-secondary ${state.practice.currentFilter === 'basic' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px; white-space: nowrap;" data-filter="basic">Podstawowe (TAK/NIE)</button>
+        <button class="btn btn-secondary ${state.practice.currentFilter === 'specialist' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px; white-space: nowrap;" data-filter="specialist">Specjalistyczne (A/B/C)</button>
+        <button class="btn btn-secondary ${state.practice.currentFilter === 'mastered' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px; white-space: nowrap;" data-filter="mastered">🎓 Opanowane (${masteredTotal})</button>
+      </div>
       <div class="card text-center">
-        <p style="color: var(--text-muted); padding: 40px 0;">Brak pytań spełniających kryteria.</p>
+        <p style="color: var(--text-muted); padding: 40px 0;">${emptyMsg}</p>
       </div>
     `;
+    container.querySelectorAll('[data-filter]').forEach(b => {
+      b.addEventListener('click', () => {
+        state.practice.currentFilter = b.getAttribute('data-filter');
+        filterPracticeQuestions();
+        state.practice.currentIndex = 0;
+        state.practice.selectedAnswer = null;
+        state.practice.isAnswered = false;
+        renderPracticeUI();
+      });
+    });
     return;
   }
 
@@ -801,21 +972,41 @@ function renderPracticeUI() {
   const isAnswered = state.practice.isAnswered;
   const selected = state.practice.selectedAnswer;
 
+  // Will the current question leave the pool once we move on? (just mastered,
+  // or, in review mode, just missed and sent back to the learning pool.)
+  const willBeRemoved = isAnswered && (
+    state.practice.currentFilter === 'mastered' ? !isMastered(q) : isMastered(q)
+  );
+
+  // Streak progress dots toward mastery (e.g. ●●○ = 2 of 3 in a row correct)
+  const streak = getStreak(q);
+  let streakDots = '';
+  for (let s = 0; s < MASTERY_THRESHOLD; s++) {
+    const filled = s < streak;
+    streakDots += `<span style="font-size: 13px; color: ${filled ? 'var(--accent-green)' : 'var(--text-muted)'};">${filled ? '●' : '○'}</span>`;
+  }
+  const streakHtml = `
+    <span title="Poprawne odpowiedzi z rzędu — ${MASTERY_THRESHOLD} z rzędu usuwa pytanie z puli"
+          style="display: inline-flex; align-items: center; gap: 3px;">
+      ${streakDots}
+    </span>
+  `;
+
   // Media HTML
   let mediaHtml = '';
   if (q.media) {
     if (q.mediaType === 'video') {
-      const vidUrl = `${CDN_VID_BASE}${q.media}`;
+      const vidUrl = mediaUrl(q.media, 'video');
       mediaHtml = `
         <div class="media-viewport">
-          <video id="practice-video" src="${vidUrl}" playsinline autoplay loop muted preload="auto">
+          <video id="practice-video" src="${vidUrl}" playsinline autoplay loop muted controls controlsList="nodownload noplaybackrate" disablepictureinpicture preload="auto">
             Twoja przeglądarka nie obsługuje wideo.
           </video>
           <button class="replay-btn" onclick="document.getElementById('practice-video').play()">🔁 Odtwórz</button>
         </div>
       `;
     } else {
-      const imgUrl = `${CDN_IMG_BASE}${q.media}`;
+      const imgUrl = mediaUrl(q.media, 'image');
       mediaHtml = `
         <div class="media-viewport">
           <img src="${imgUrl}" alt="Ilustracja do pytania" />
@@ -876,14 +1067,39 @@ function renderPracticeUI() {
   let feedbackHtml = '';
   if (isAnswered) {
     const isCorrect = selected === q.correct;
+    const nowMastered = isCorrect && isMastered(q);
+    let masteryNote = '';
+    if (nowMastered) {
+      masteryNote = `
+        <div style="margin-top: 10px; font-size: 13px; font-weight: 700; color: var(--accent-green);">
+          🎓 Opanowane! Pytanie zostało usunięte z puli do nauki. Znajdziesz je w zakładce „Opanowane”.
+        </div>
+      `;
+    } else if (isCorrect) {
+      const left = MASTERY_THRESHOLD - getStreak(q);
+      masteryNote = `
+        <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
+          Seria: ${getStreak(q)}/${MASTERY_THRESHOLD} — jeszcze ${left} ${left === 1 ? 'poprawna odpowiedź' : 'poprawne odpowiedzi'}, aby opanować.
+        </div>
+      `;
+    } else if (state.practice.currentFilter === 'mastered') {
+      masteryNote = `
+        <div style="margin-top: 8px; font-size: 12px; color: var(--accent-red);">
+          Pytanie wróciło do puli do nauki — seria została wyzerowana.
+        </div>
+      `;
+    }
     feedbackHtml = `
-      <div style="background: ${isCorrect ? 'var(--accent-green-bg)' : 'var(--accent-red-bg)'}; border: 1px solid ${isCorrect ? 'var(--accent-green)' : 'var(--accent-red)'}; border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between;">
-        <span style="font-weight: 700; color: ${isCorrect ? 'var(--accent-green)' : 'var(--accent-red)'};">
-          ${isCorrect ? '✓ Dobra odpowiedź!' : '✗ Błędna odpowiedź!'}
-        </span>
-        <span style="font-size: 13px; color: var(--text-secondary);">
-          Prawidłowa: <strong style="color: var(--accent-green);">${q.correct}</strong>
-        </span>
+      <div style="background: ${isCorrect ? 'var(--accent-green-bg)' : 'var(--accent-red-bg)'}; border: 1px solid ${isCorrect ? 'var(--accent-green)' : 'var(--accent-red)'}; border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 16px;">
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <span style="font-weight: 700; color: ${isCorrect ? 'var(--accent-green)' : 'var(--accent-red)'};">
+            ${isCorrect ? '✓ Dobra odpowiedź!' : '✗ Błędna odpowiedź!'}
+          </span>
+          <span style="font-size: 13px; color: var(--text-secondary);">
+            Prawidłowa: <strong style="color: var(--accent-green);">${q.correct}</strong>
+          </span>
+        </div>
+        ${masteryNote}
       </div>
     `;
   }
@@ -891,9 +1107,10 @@ function renderPracticeUI() {
   container.innerHTML = `
     <!-- Filter tabs -->
     <div style="display: flex; gap: 8px; margin-bottom: 12px; overflow-x: auto; padding-bottom: 4px;">
-      <button class="btn btn-secondary ${state.practice.currentFilter === 'all' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px;" data-filter="all">Wszystkie (${state.questionsCache[state.currentCategory]?.all.length || 0})</button>
-      <button class="btn btn-secondary ${state.practice.currentFilter === 'basic' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px;" data-filter="basic">Podstawowe (TAK/NIE)</button>
-      <button class="btn btn-secondary ${state.practice.currentFilter === 'specialist' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px;" data-filter="specialist">Specjalistyczne (A/B/C)</button>
+      <button class="btn btn-secondary ${state.practice.currentFilter === 'all' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px; white-space: nowrap;" data-filter="all">Do nauki (${activePoolCount})</button>
+      <button class="btn btn-secondary ${state.practice.currentFilter === 'basic' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px; white-space: nowrap;" data-filter="basic">Podstawowe (TAK/NIE)</button>
+      <button class="btn btn-secondary ${state.practice.currentFilter === 'specialist' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px; white-space: nowrap;" data-filter="specialist">Specjalistyczne (A/B/C)</button>
+      <button class="btn btn-secondary ${state.practice.currentFilter === 'mastered' ? 'btn-primary' : ''}" style="width: auto; padding: 7px 14px; font-size: 12px; white-space: nowrap;" data-filter="mastered">🎓 Opanowane (${masteredTotal})</button>
     </div>
 
     <!-- Live search input -->
@@ -901,8 +1118,11 @@ function renderPracticeUI() {
 
     <!-- Question counter -->
     <div class="flex-between mb-2">
-      <span class="badge badge-blue">Pytanie ${idx + 1} z ${total} (ID: ${q.id})</span>
-      <span style="font-size: 12px; color: var(--text-muted);">${q.type === 'basic' ? 'Podstawowe' : 'Specjalistyczne'}</span>
+      <span class="badge ${state.practice.currentFilter === 'mastered' ? 'badge-green' : 'badge-blue'}">Pytanie ${idx + 1} z ${total} (ID: ${q.id})</span>
+      <span style="display: inline-flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-muted);">
+        ${streakHtml}
+        <span>${q.type === 'basic' ? 'Podstawowe' : 'Specjalistyczne'}</span>
+      </span>
     </div>
 
     ${mediaHtml}
@@ -915,6 +1135,12 @@ function renderPracticeUI() {
     ${feedbackHtml}
     ${answersHtml}
 
+    ${state.practice.currentFilter === 'mastered' ? `
+      <button id="btn-unmaster" class="btn btn-secondary" style="margin-top: 14px; font-size: 13px;">
+        ↩ Przywróć to pytanie do nauki
+      </button>
+    ` : ''}
+
     <!-- Navigation buttons -->
     <div style="display: flex; gap: 10px; margin-top: 14px;">
       <button id="btn-practice-prev" class="btn btn-secondary" style="flex: 1;" ${idx === 0 ? 'disabled' : ''}>
@@ -923,11 +1149,19 @@ function renderPracticeUI() {
       <button id="btn-practice-random" class="btn btn-secondary" style="width: 50px;">
         🎲
       </button>
-      <button id="btn-practice-next" class="btn btn-primary" style="flex: 1;" ${idx === total - 1 ? 'disabled' : ''}>
-        Następne ▶
+      <button id="btn-practice-next" class="btn btn-primary" style="flex: 1;" ${idx === total - 1 && !willBeRemoved ? 'disabled' : ''}>
+        ${willBeRemoved ? 'Dalej ▶' : 'Następne ▶'}
       </button>
     </div>
   `;
+
+  // Restore (un-master) the current question from the review list.
+  document.getElementById('btn-unmaster')?.addEventListener('click', () => {
+    unmasterQuestion(q);
+    advancePractice('next');
+  });
+
+  playActiveVideo(container);
 
   // Attach search input listener
   const searchEl = document.getElementById('practice-search-input');
@@ -965,7 +1199,10 @@ function renderPracticeUI() {
       state.practice.isAnswered = true;
 
       const isCorrect = ans === q.correct;
-      vibrate(isCorrect ? 30 : 70);
+
+      // Update mastery streak (3 correct in a row -> removed from the pool).
+      const justMastered = recordMasteryAnswer(q, isCorrect);
+      vibrate(justMastered ? 120 : (isCorrect ? 30 : 70));
 
       // Record stats
       state.userStats.questionsAnswered++;
@@ -978,35 +1215,52 @@ function renderPracticeUI() {
   });
 
   // Prev / Next / Random buttons
-  document.getElementById('btn-practice-prev')?.addEventListener('click', () => {
-    if (state.practice.currentIndex > 0) {
-      state.practice.currentIndex--;
-      state.practice.selectedAnswer = null;
-      state.practice.isAnswered = false;
-      renderPracticeUI();
-    }
-  });
+  document.getElementById('btn-practice-prev')?.addEventListener('click', () => advancePractice('prev'));
+  document.getElementById('btn-practice-next')?.addEventListener('click', () => advancePractice('next'));
+  document.getElementById('btn-practice-random')?.addEventListener('click', () => advancePractice('random'));
+}
 
-  document.getElementById('btn-practice-next')?.addEventListener('click', () => {
-    if (state.practice.currentIndex < state.practice.filteredQuestions.length - 1) {
-      state.practice.currentIndex++;
-      state.practice.selectedAnswer = null;
-      state.practice.isAnswered = false;
-      renderPracticeUI();
-    }
-  });
+// Move through the practice pool, re-filtering so questions that just became
+// mastered (or, in review mode, just un-mastered) drop out of the list cleanly.
+function advancePractice(direction) {
+  const list = state.practice.filteredQuestions;
+  const curQ = list[state.practice.currentIndex];
 
-  document.getElementById('btn-practice-random')?.addEventListener('click', () => {
-    const len = state.practice.filteredQuestions.length;
-    if (len > 1) {
-      let rand = Math.floor(Math.random() * len);
-      if (rand === state.practice.currentIndex) rand = (rand + 1) % len;
-      state.practice.currentIndex = rand;
-      state.practice.selectedAnswer = null;
-      state.practice.isAnswered = false;
-      renderPracticeUI();
+  filterPracticeQuestions();
+  const newList = state.practice.filteredQuestions;
+
+  if (newList.length === 0) {
+    state.practice.currentIndex = 0;
+    state.practice.selectedAnswer = null;
+    state.practice.isAnswered = false;
+    renderPracticeUI();
+    return;
+  }
+
+  // Where did the current question land after re-filtering?
+  const stillThere = curQ ? newList.findIndex(item => item.id === curQ.id) : -1;
+  let target;
+
+  if (direction === 'random') {
+    target = Math.floor(Math.random() * newList.length);
+    if (newList.length > 1 && target === stillThere) {
+      target = (target + 1) % newList.length;
     }
-  });
+  } else if (stillThere === -1) {
+    // Current question was removed (mastered / un-mastered); the slot it left
+    // now holds the next question, so stay in place (prev steps one back).
+    const base = Math.min(state.practice.currentIndex, newList.length - 1);
+    target = direction === 'prev' ? Math.max(0, base - 1) : base;
+  } else {
+    target = direction === 'prev'
+      ? Math.max(0, stillThere - 1)
+      : Math.min(newList.length - 1, stillThere + 1);
+  }
+
+  state.practice.currentIndex = target;
+  state.practice.selectedAnswer = null;
+  state.practice.isAnswered = false;
+  renderPracticeUI();
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,16 +1325,17 @@ function renderMistakesUI() {
   let mediaHtml = '';
   if (q.media) {
     if (q.mediaType === 'video') {
-      const vidUrl = `${CDN_VID_BASE}${q.media}`;
+      const vidUrl = mediaUrl(q.media, 'video');
       mediaHtml = `
         <div class="media-viewport">
-          <video id="mistake-video" src="${vidUrl}" playsinline autoplay loop muted preload="auto">
+          <video id="mistake-video" src="${vidUrl}" playsinline autoplay loop muted controls controlsList="nodownload noplaybackrate" disablepictureinpicture preload="auto">
             Wideo
           </video>
+          <button class="replay-btn" onclick="document.getElementById('mistake-video').play()">🔁 Odtwórz</button>
         </div>
       `;
     } else {
-      const imgUrl = `${CDN_IMG_BASE}${q.media}`;
+      const imgUrl = mediaUrl(q.media, 'image');
       mediaHtml = `
         <div class="media-viewport">
           <img src="${imgUrl}" alt="Ilustracja do pytania" />
@@ -1189,6 +1444,8 @@ function renderMistakesUI() {
       </button>
     </div>
   `;
+
+  playActiveVideo(container);
 
   // Clear all mistakes button
   document.getElementById('btn-clear-all-mistakes')?.addEventListener('click', () => {

@@ -1,6 +1,6 @@
 // sw.js — Service Worker for offline capability & local caching
 
-const CACHE_NAME = 'prawo-jazdy-offline-v2';
+const CACHE_NAME = 'prawo-jazdy-offline-v3';
 
 const STATIC_ASSETS = [
   './',

@@ -59,9 +59,13 @@ if (!remotes.includes('origin')) {
 }
 
 // 5. Enable GitHub Pages using GitHub Actions
-try {
-  run(`gh repo edit ${username}/${repoName} --enable-pages --pages-branch main`, true);
-} catch (_) {}
+// (the first push runs the workflow before Pages exists, so enable it and re-run)
+const pagesExists = runCapture(`gh api repos/${username}/${repoName}/pages -q .html_url`);
+if (!pagesExists) {
+  console.log('⚙️  Włączanie GitHub Pages (źródło: GitHub Actions)...');
+  run(`gh api repos/${username}/${repoName}/pages -X POST -f build_type=workflow`, true);
+  run(`gh workflow run deploy.yml --repo ${username}/${repoName} --ref main`, true);
+}
 
 const siteUrl = `https://${username}.github.io/${repoName}/`;
 
